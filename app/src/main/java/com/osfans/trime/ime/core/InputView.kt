@@ -6,8 +6,13 @@
 package com.osfans.trime.ime.core
 
 import android.annotation.SuppressLint
+import android.content.res.Configuration
+import android.graphics.Rect
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.InsetDrawable
 import android.os.Build
 import android.view.ContextThemeWrapper
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
@@ -165,6 +170,45 @@ class InputView(
 
     val keyboardView: View
 
+    /** 浮动键盘状态：为 true 时键盘脱离底部、可拖动。 */
+    var floating: Boolean = false
+        private set
+
+    private var floatingScale = 1f
+    private var floatingScaleY = 1f
+    private var portraitContentRatio = 0f
+    private var floatingMoveStartX = 0f
+    private var floatingMoveStartY = 0f
+    private var floatingStartTx = 0f
+    private var floatingStartTy = 0f
+    private var floatingResizeStartX = 0f
+    private var floatingResizeStartY = 0f
+    private var floatingResizeStartScale = 1f
+    private val floatingLoc = IntArray(2)
+    private var lastAppliedOrientation = Configuration.ORIENTATION_UNDEFINED
+
+    /** 浮动模式下顶部拖动手柄（拖动位置）。 */
+    private val floatingDragHandle =
+        view(::View) {
+            setBackgroundColor(scope.colors.borderColor)
+            visibility = View.GONE
+            setOnTouchListener { _, event -> handleFloatingMove(event) }
+        }
+
+    /** 浮动模式下右下角的橙色缩放手柄：可视圆点小、触摸区大，便于按到。 */
+    private val floatingResizeHandle =
+        view(::View) {
+            val dot =
+                GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(0xFFFF9800.toInt())
+                    setStroke(dp(2), android.graphics.Color.WHITE)
+                }
+            background = InsetDrawable(dot, dp(8))
+            visibility = View.GONE
+            setOnTouchListener { _, event -> handleFloatingResize(event) }
+        }
+
     /** Restyles colors after a scheme switch without rebuilding the view tree. */
     fun refreshColors() {
         keyboardBackground.imageDrawable = scope.drawable("keyboard_background")
@@ -197,9 +241,16 @@ class InputView(
                     },
                 )
                 add(
+                    floatingDragHandle,
+                    lParams(matchParent, dp(26)) {
+                        topOfParent()
+                        centerHorizontally()
+                    },
+                )
+                add(
                     inputBar.view,
                     lParams(matchParent, dp(inputBar.themedHeight)) {
-                        topOfParent()
+                        below(floatingDragHandle)
                         centerHorizontally()
                     },
                 )
@@ -234,7 +285,21 @@ class InputView(
                         bottomOfParent()
                     },
                 )
+                add(
+                    floatingResizeHandle,
+                    lParams(dp(46), dp(46)) {
+                        endOfParent()
+                        bottomOfParent()
+                    },
+                )
             }
+
+        keyboardView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            if (floating) {
+                clampFloating()
+                applyFloatingTransform()
+            }
+        }
 
         updateWindowViewHeightJob =
             service.lifecycleScope.launch {
@@ -307,6 +372,168 @@ class InputView(
         inputBar.view.setPadding(sidePadding, 0, sidePadding, 0)
     }
 
+    private fun floatingMinVisible(): Float = dp(96).toFloat()
+
+    private fun floatingShortSide(): Float = minOf(width, height).toFloat()
+
+    /**
+     * 浮动时的键盘布局宽度。
+     * 横屏时按 keyboard_height_land / keyboard_height 收窄布局宽度，
+     * 让 Trime 重新排版按键，使每个按键的宽高比与竖屏一致（不再被压成棍子）。
+     */
+    private fun floatingTargetWidth(): Int = floatingShortSide().toInt().coerceAtLeast(dp(180))
+
+    private fun applyFloatingWidth() {
+        keyboardView.updateLayoutParams<LayoutParams> {
+            width = if (floating) floatingTargetWidth() else LayoutParams.MATCH_PARENT
+        }
+        keyboardView.requestLayout()
+    }
+
+    private fun floatingMaxScale(): Float = 1.6f
+
+    /** 约束浮动键盘，保证至少有一块面积留在屏幕内。 */
+    private fun clampFloating() {
+        val k = keyboardView
+        if (k.width <= 0 || k.height <= 0) return
+        val w = k.width * floatingScale
+        val kh = k.height * floatingScale
+        val baseTop = (height - k.height).toFloat()
+        val v = floatingMinVisible()
+        k.translationX = k.translationX.coerceIn(v - w, width - v)
+        k.translationY = k.translationY.coerceIn(-baseTop, height - kh - baseTop)
+    }
+
+    /** 让预编辑（拼音提示）跟随浮动键盘。 */
+    private fun syncFloatingOverlays() {
+        if (floating) {
+            preedit.ui.root.translationX = keyboardView.left + keyboardView.translationX
+            preedit.ui.root.translationY = keyboardView.translationY
+        } else {
+            preedit.ui.root.translationX = 0f
+            preedit.ui.root.translationY = 0f
+        }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun handleFloatingMove(event: MotionEvent): Boolean {
+        if (!floating) return false
+        val k = keyboardView
+        return when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                floatingMoveStartX = event.rawX
+                floatingMoveStartY = event.rawY
+                floatingStartTx = k.translationX
+                floatingStartTy = k.translationY
+                true
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                k.translationX = floatingStartTx + (event.rawX - floatingMoveStartX)
+                k.translationY = floatingStartTy + (event.rawY - floatingMoveStartY)
+                clampFloating()
+                syncFloatingOverlays()
+                service.requestInsetsUpdate()
+                true
+            }
+
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> true
+            else -> false
+        }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun handleFloatingResize(event: MotionEvent): Boolean {
+        if (!floating) return false
+        return when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                floatingResizeStartX = event.rawX
+                floatingResizeStartY = event.rawY
+                floatingResizeStartScale = floatingScale
+                true
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                val dx = event.rawX - floatingResizeStartX
+                val dy = event.rawY - floatingResizeStartY
+                floatingScale =
+                    (floatingResizeStartScale + (dx + dy) / 2f / 600f)
+                        .coerceIn(0.3f, floatingMaxScale())
+                clampFloating()
+                applyFloatingTransform()
+                true
+            }
+
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> true
+            else -> false
+        }
+    }
+
+    private fun applyFloatingTransform() {
+        val k = keyboardView
+        k.pivotX = 0f
+        k.pivotY = 0f
+        k.scaleX = floatingScale
+        k.scaleY = floatingScale
+        syncFloatingOverlays()
+        service.requestInsetsUpdate()
+    }
+
+    /** 浮动键盘当前在屏幕上的实际矩形（含等比缩放）。 */
+    fun keyboardBounds(out: Rect) {
+        val k = keyboardView
+        k.getLocationInWindow(floatingLoc)
+        val w = (k.width * floatingScale).toInt()
+        val h = (k.height * floatingScale).toInt()
+        out.set(floatingLoc[0], floatingLoc[1], floatingLoc[0] + w, floatingLoc[1] + h)
+    }
+
+    fun setFloating(enabled: Boolean) {
+        if (floating == enabled) return
+        floating = enabled
+        floatingDragHandle.visibility = if (enabled) View.VISIBLE else View.GONE
+        floatingResizeHandle.visibility = if (enabled) View.VISIBLE else View.GONE
+        if (enabled) {
+            floatingScale = 0.85f
+        } else {
+            floatingScale = 1f
+            keyboardView.translationX = 0f
+            keyboardView.translationY = 0f
+        }
+        applyFloatingWidth()
+        keyboardView.post {
+            if (floating) {
+                keyboardView.translationX = floatingTargetWidth() * (1f - floatingScale) / 2f
+                // 上移量受限，保证键盘上方至少留出 dp(72) 放拼音预编辑行
+                val maxLift = (height - keyboardView.height - dp(72)).coerceAtLeast(0).toFloat()
+                keyboardView.translationY = -minOf(height * 0.20f, maxLift)
+            }
+            clampFloating()
+            applyFloatingTransform()
+        }
+    }
+
+    /** 横屏默认以浮动形态呼出；方向变化时自动切换。 */
+    private fun applyOrientationFloatingDefault() {
+        val orientation = resources.configuration.orientation
+        if (orientation == lastAppliedOrientation) return
+        lastAppliedOrientation = orientation
+        val shouldFloat = orientation == Configuration.ORIENTATION_LANDSCAPE
+        keyboardView.post {
+            if (shouldFloat) {
+                floating = false
+                setFloating(true)
+            } else {
+                setFloating(false)
+            }
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applyOrientationFloatingDefault()
+    }
+
     override fun onApplyWindowInsets(insets: WindowInsets): WindowInsets {
         bottomPaddingSpace.updateLayoutParams<LayoutParams> {
             bottomMargin = getNavBarBottomInset(insets)
@@ -323,6 +550,7 @@ class InputView(
         if (!restarting) {
             windowManager.attachWindow(KeyboardWindow)
         }
+        applyOrientationFloatingDefault()
     }
 
     fun updateEnterKeyLabel(info: EditorInfo) {

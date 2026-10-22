@@ -19,7 +19,7 @@ include(Boost)
 
 option(WITH_GFLAGS "Use gflags" OFF)
 option(WITH_GTEST "Use googletest" OFF)
-option(WITH_UNWIND "Enable libunwind support" OFF)
+set(WITH_UNWIND "none" CACHE STRING "unwind driver") # none disables glog libunwind detection
 add_subdirectory(librime/deps/glog)
 target_compile_options(
   glog_internal PRIVATE "-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=.")

@@ -10,6 +10,7 @@ import android.app.Dialog
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.graphics.Rect
 import android.graphics.RectF
 import android.inputmethodservice.InputMethodService
 import android.os.Build
@@ -75,7 +76,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     private lateinit var decorView: View
     private lateinit var contentView: FrameLayout
     private lateinit var lastKnownConfig: Configuration
-    private var inputView: InputView? = null
+    internal var inputView: InputView? = null
     private var candidatesView: CandidatesView? = null
     private val navBarManager = NavigationBarManager()
     private val inputDeviceManager = InputDeviceManager { useVirtualKeyboard, useCandidatesView ->
@@ -475,9 +476,19 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     }
 
     private val inputViewLocation = intArrayOf(0, 0)
+    private val floatRect = Rect()
 
     override fun onComputeInsets(outInsets: Insets) {
-        if (inputDeviceManager.useVirtualKeyboard) {
+        val view = inputView
+        if (view != null && view.floating && inputDeviceManager.useVirtualKeyboard) {
+            view.keyboardBounds(floatRect)
+            outInsets.apply {
+                contentTopInsets = decorView.height
+                visibleTopInsets = decorView.height
+                touchableInsets = Insets.TOUCHABLE_INSETS_REGION
+                touchableRegion.set(floatRect)
+            }
+        } else if (inputDeviceManager.useVirtualKeyboard) {
             inputView?.keyboardView?.getLocationInWindow(inputViewLocation)
             outInsets.apply {
                 contentTopInsets = inputViewLocation[1]
@@ -496,6 +507,16 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     }
 
     // always show InputView since we delegate CandidatesView's visibility to it
+    fun setFloating(enabled: Boolean) {
+        inputView?.setFloating(enabled)
+    }
+
+    fun requestInsetsUpdate() {
+        if (!::decorView.isInitialized) return
+        decorView.requestLayout()
+        decorView.invalidate()
+    }
+
     @SuppressLint("MissingSuperCall")
     override fun onEvaluateInputViewShown() = true
 

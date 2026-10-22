@@ -194,8 +194,19 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
                     "select_candidate" -> handleSelectCandidate(arg)
                     "switch_hide_key_symbol" -> switchHideKeySymbol()
                     "switch_hide_key_hint" -> switchHideKeyHint()
+                    "float_keyboard" -> handleFloatKeyboard(arg)
                     else -> handleIntentAction(action.command, arg)
                 }
+            }
+
+            private fun handleFloatKeyboard(arg: String) {
+                val enable =
+                    when (arg.lowercase()) {
+                        "on", "true", "1" -> true
+                        "off", "false", "0" -> false
+                        else -> !(service.inputView?.floating ?: false)
+                    }
+                service.setFloating(enable)
             }
 
             private fun handleLiquidKeyboard(arg: String) {
